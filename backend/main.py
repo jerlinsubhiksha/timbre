@@ -2,7 +2,6 @@
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import json
-import uuid
 
 app = FastAPI(title="VOXGUARD Backend")
 
@@ -14,15 +13,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Call Signaling Room State
-rooms = {}
+# Call Signaling State
+active_connections = {} # uid -> websocket
 
 class VoxDetector:
     def __init__(self):
         self.risk_history = []
         
     def analyze(self, audio_data):
-        # 1. Voice Activity Detection (VAD) & Noise
         energy = np.sum(audio_data**2) / len(audio_data) if len(audio_data) > 0 else 0
         speech_detected = energy > 0.0001
         
@@ -30,7 +28,6 @@ class VoxDetector:
         if energy > 0.05: noise_level = "HIGH"
         elif energy > 0.01: noise_level = "MEDIUM"
 
-        # 2. AI Model Inference (No Fake Scores)
         model_status = "MODEL NOT CONFIGURED"
         final_classification = "UNCERTAIN"
         details = "Acoustic ML inference requires configured pretrained weights. Fallback to basic heuristics."
@@ -61,28 +58,28 @@ async def websocket_analyze(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
 
-# Basic Signaling Server for WebRTC Calls
-@app.websocket("/ws/call/{room_id}")
-async def websocket_call(websocket: WebSocket, room_id: str):
+@app.websocket("/ws/call/{uid}")
+async def websocket_call(websocket: WebSocket, uid: str):
     await websocket.accept()
-    if room_id not in rooms:
-        rooms[room_id] = []
-    
-    if len(rooms[room_id]) >= 2:
-        await websocket.send_json({"type": "error", "message": "Room full"})
-        await websocket.close()
-        return
-
-    rooms[room_id].append(websocket)
+    active_connections[uid] = websocket
     
     try:
         while True:
             data = await websocket.receive_text()
-            # Broadcast to the OTHER person in the room
-            for client in rooms[room_id]:
-                if client != websocket:
-                    await client.send_text(data)
+            msg = json.loads(data)
+            
+            target_uid = msg.get("target_uid")
+            
+            if target_uid and target_uid in active_connections:
+                target_ws = active_connections[target_uid]
+                # Forward the message to the target user, injecting the sender's uid
+                msg["sender_uid"] = uid
+                await target_ws.send_text(json.dumps(msg))
+            else:
+                # Target user is not online
+                if msg.get("type") == "offer":
+                    await websocket.send_text(json.dumps({"type": "error", "message": "User is not online."}))
+                    
     except WebSocketDisconnect:
-        rooms[room_id].remove(websocket)
-        if len(rooms[room_id]) == 0:
-            del rooms[room_id]
+        if uid in active_connections:
+            del active_connections[uid]
