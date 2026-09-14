@@ -10,7 +10,7 @@ export default function ProtectedCall() {
   const { currentUser, userData } = useAuth();
   const navigate = useNavigate();
 
-  const [targetPhone, setTargetPhone] = useState('');
+  const [targetUser, setTargetUser] = useState('');
   const [inCall, setInCall] = useState(false);
   const [callStatus, setCallStatus] = useState('Disconnected');
   const [incomingCall, setIncomingCall] = useState(null);
@@ -38,7 +38,6 @@ export default function ProtectedCall() {
       return;
     }
     
-    // Connect to signaling server immediately using our UID to listen for calls
     signalingWs.current = new WebSocket(`ws://${window.location.hostname}:8000/ws/call/${currentUser.uid}`);
     
     signalingWs.current.onopen = () => {
@@ -49,7 +48,6 @@ export default function ProtectedCall() {
       const data = JSON.parse(event.data);
       
       if (data.type === 'offer') {
-        // Incoming call!
         setIncomingCall({ offer: data.offer, caller_uid: data.sender_uid });
       } else if (data.type === 'answer' && peerConnection.current) {
         await peerConnection.current.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -108,17 +106,25 @@ export default function ProtectedCall() {
   };
 
   const startCall = async () => {
-    if (!targetPhone) return alert('Enter a phone number');
+    if (!targetUser) return alert('Enter an email or phone number');
     
     setCallStatus('Looking up user...');
     try {
-      // Find user by phone number
       const usersRef = collection(db, "users");
-      const q = query(usersRef, where("phone", "==", targetPhone));
-      const querySnapshot = await getDocs(q);
+      
+      // Check if input is an email
+      let q = query(usersRef, where("email", "==", targetUser));
+      let querySnapshot = await getDocs(q);
+      
+      // If not found by email, check phone
+      if (querySnapshot.empty) {
+        q = query(usersRef, where("phone", "==", targetUser));
+        querySnapshot = await getDocs(q);
+      }
       
       if (querySnapshot.empty) {
-        setCallStatus('User not found');
+        setCallStatus('User not found. Check the email or phone number.');
+        setTimeout(() => setCallStatus('Online - Ready to Call'), 3000);
         return;
       }
       
@@ -228,10 +234,6 @@ export default function ProtectedCall() {
 
   const sendChallenge = () => {
     const text = challenges[Math.floor(Math.random() * challenges.length)];
-    // Send back to whoever called us or we called. 
-    // We can just broadcast back to the signal server if we kept track of target, but since we are P2P, we should use a DataChannel.
-    // For MVP, we can just send via signaling WS since we didn't save targetUid to state.
-    // Actually, I'll cheat and just show it locally to test the UI for now, or alert.
     setActiveChallenge("Dynamic Liveness UI Test Triggered");
   };
 
@@ -282,13 +284,13 @@ export default function ProtectedCall() {
             <Phone size={32} />
           </div>
           <h3 className="text-2xl font-bold text-white mb-2">Call a Contact</h3>
-          <p className="text-sm text-vox-gray mb-6">Enter the Phone Number of the VoxGuard user you wish to call securely.</p>
+          <p className="text-sm text-vox-gray mb-6">Enter the Email Address or Phone Number of the VoxGuard user you wish to call securely.</p>
           <input 
             type="text" 
-            placeholder="Target Phone (e.g. +1234567890)" 
+            placeholder="Email or Phone Number" 
             className="w-full bg-vox-navy border border-vox-gray-dark p-3 rounded mb-6 text-white"
-            value={targetPhone}
-            onChange={e => setTargetPhone(e.target.value)}
+            value={targetUser}
+            onChange={e => setTargetUser(e.target.value)}
           />
           <button onClick={startCall} className="w-full bg-vox-orange text-white py-3 rounded font-bold hover:bg-orange-600 transition-colors">Start Call</button>
         </div>

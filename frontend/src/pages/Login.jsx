@@ -11,7 +11,7 @@ export default function Login() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   
-  const { login, signup } = useAuth();
+  const { login, signup, loginWithGoogle } = useAuth();
   const navigate = useNavigate();
 
   async function handleSubmit(e) {
@@ -32,18 +32,42 @@ export default function Login() {
     setLoading(false);
   }
 
+  async function handleGoogleLogin() {
+    setError('');
+    setLoading(true);
+    try {
+      await loginWithGoogle();
+      navigate('/protected-call');
+    } catch (err) {
+      setError(err.message);
+    }
+    setLoading(false);
+  }
+
   return (
     <div className="flex-1 flex items-center justify-center p-6">
       <div className="bg-vox-navy-light p-8 rounded-2xl border border-vox-gray-dark/30 max-w-md w-full shadow-2xl">
-        <div className="flex flex-col items-center mb-8">
+        <div className="flex flex-col items-center mb-6">
           <ShieldCheck size={48} className="text-vox-orange mb-4" />
           <h2 className="text-2xl font-bold text-white">{isLogin ? 'Log In to VoxGuard' : 'Create an Account'}</h2>
-          <p className="text-sm text-vox-gray text-center mt-2">
-            {isLogin ? 'Enter your credentials to securely make calls.' : 'Register to get a unique VoxGuard phone number.'}
-          </p>
         </div>
 
         {error && <div className="bg-red-500/20 border border-red-500 text-red-400 p-3 rounded mb-6 text-sm">{error}</div>}
+
+        <button 
+          onClick={handleGoogleLogin}
+          disabled={loading}
+          className="w-full bg-white text-gray-900 py-3 rounded font-bold hover:bg-gray-100 transition-colors mb-6 flex items-center justify-center gap-2"
+        >
+          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-5 h-5" />
+          Continue with Google
+        </button>
+
+        <div className="relative flex py-2 items-center mb-4">
+          <div className="flex-grow border-t border-vox-gray-dark/50"></div>
+          <span className="flex-shrink-0 mx-4 text-vox-gray text-sm">or with email</span>
+          <div className="flex-grow border-t border-vox-gray-dark/50"></div>
+        </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>

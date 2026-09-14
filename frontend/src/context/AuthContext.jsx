@@ -4,7 +4,9 @@ import {
   createUserWithEmailAndPassword, 
   signInWithEmailAndPassword, 
   signOut, 
-  onAuthStateChanged 
+  onAuthStateChanged,
+  GoogleAuthProvider,
+  signInWithPopup
 } from 'firebase/auth';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 
@@ -21,7 +23,6 @@ export function AuthProvider({ children }) {
 
   async function signup(email, password, phone) {
     const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-    // Save additional user info in Firestore
     await setDoc(doc(db, "users", userCredential.user.uid), {
       email: email,
       phone: phone,
@@ -32,6 +33,25 @@ export function AuthProvider({ children }) {
 
   function login(email, password) {
     return signInWithEmailAndPassword(auth, email, password);
+  }
+
+  async function loginWithGoogle() {
+    const provider = new GoogleAuthProvider();
+    const userCredential = await signInWithPopup(auth, provider);
+    
+    // Check if user exists in Firestore
+    const docRef = doc(db, "users", userCredential.user.uid);
+    const docSnap = await getDoc(docRef);
+    
+    if (!docSnap.exists()) {
+      // First time Google login, create their document
+      await setDoc(docRef, {
+        email: userCredential.user.email,
+        phone: "", // We can prompt them for this later or just let them call by email
+        uid: userCredential.user.uid
+      });
+    }
+    return userCredential;
   }
 
   function logout() {
@@ -61,6 +81,7 @@ export function AuthProvider({ children }) {
     userData,
     signup,
     login,
+    loginWithGoogle,
     logout
   };
 
