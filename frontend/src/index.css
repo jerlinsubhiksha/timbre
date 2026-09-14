@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@theme {
+  --color-vox-navy: #0A1128;
+  --color-vox-navy-light: #1A2238;
+  --color-vox-orange: #F97316;
+  --color-vox-orange-glow: rgba(249, 115, 22, 0.4);
+  --color-vox-gray: #DDDDDD;
+  --color-vox-gray-dark: #888888;
+}
+
+body {
+  background-color: var(--color-vox-navy);
+  color: var(--color-vox-gray);
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  overflow-x: hidden;
+}

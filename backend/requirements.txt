@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+websockets
+numpy
+librosa
+scikit-learn
+python-multipart
