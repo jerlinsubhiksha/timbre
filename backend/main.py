@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import json
@@ -22,7 +22,7 @@ class VoxDetector:
         
     def analyze(self, audio_data):
         energy = np.sum(audio_data**2) / len(audio_data) if len(audio_data) > 0 else 0
-        speech_detected = energy > 0.0001
+        speech_detected = bool(energy > 0.0001)
         
         noise_level = "LOW"
         if energy > 0.05: noise_level = "HIGH"
