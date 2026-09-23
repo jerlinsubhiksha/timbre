@@ -1,51 +1,47 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Shield, ShieldAlert, ShieldCheck, PhoneIncoming } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { Shield, Phone, PhoneOff, ShieldAlert, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
-import { useNavigate } from 'react-router-dom';
+import { collection, query, where, getDocs } from 'firebase/firestore';
+import { motion } from 'framer-motion';
 
 export default function ProtectedCall() {
-  const { currentUser, userData } = useAuth();
-  const navigate = useNavigate();
-
+  const { currentUser } = useAuth();
+  
+  const [callStatus, setCallStatus] = useState('Idle');
   const [targetUser, setTargetUser] = useState('');
   const [inCall, setInCall] = useState(false);
-  const [callStatus, setCallStatus] = useState('Disconnected');
   const [incomingCall, setIncomingCall] = useState(null);
-  
-  // Track who we are currently connected to so we can send the end_call signal
-  const [activeCallUid, setActiveCallUid] = useState(null);
   
   const [remoteResults, setRemoteResults] = useState(null);
   const [localResults, setLocalResults] = useState(null);
+  const [grokAlert, setGrokAlert] = useState(null);
   
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerConnection = useRef(null);
   const signalingWs = useRef(null);
-  const localStreamRef = useRef(null);
   
-  const localAnalyzeWs = useRef(null);
-  const remoteAnalyzeWs = useRef(null);
   const localAudioContext = useRef(null);
   const remoteAudioContext = useRef(null);
+  const localAnalyzeWs = useRef(null);
+  const remoteAnalyzeWs = useRef(null);
+  const grokWs = useRef(null);
+  const speechReco = useRef(null);
   
-  const challenges = ["Please say: The quick brown fox.", "Please say: Blue elephant 27.", "What color is the sky?"];
   const [activeChallenge, setActiveChallenge] = useState(null);
+  
+  const challenges = [
+    "Say the word 'Pineapple'",
+    "Tap your microphone twice",
+    "Repeat: The quick brown fox",
+  ];
 
   useEffect(() => {
-    if (!currentUser) {
-      navigate('/login');
-      return;
-    }
-    
-    signalingWs.current = new WebSocket(`ws://${window.location.hostname}:8000/ws/call/${currentUser.uid}`);
-    
-    signalingWs.current.onopen = () => {
-      setCallStatus('Online - Ready to Call');
-    };
+    if (!currentUser) return;
+
+    const wsUrl = `ws://${window.location.hostname}:8000/ws/call/${currentUser.uid}`;
+    signalingWs.current = new WebSocket(wsUrl);
 
     signalingWs.current.onmessage = async (event) => {
       const data = JSON.parse(event.data);
@@ -55,183 +51,200 @@ export default function ProtectedCall() {
       } else if (data.type === 'answer' && peerConnection.current) {
         await peerConnection.current.setRemoteDescription(new RTCSessionDescription(data.answer));
         setCallStatus('Connected');
+        setInCall(true);
       } else if (data.type === 'candidate' && peerConnection.current) {
         await peerConnection.current.addIceCandidate(new RTCIceCandidate(data.candidate));
-      } else if (data.type === 'challenge') {
-        setActiveChallenge(data.challenge);
-      } else if (data.type === 'end_call') {
-        // The remote peer ended the call
-        handleEndCall(true);
       } else if (data.type === 'error') {
-        setCallStatus(`Error: ${data.message}`);
-        setTimeout(() => setCallStatus('Online - Ready to Call'), 3000);
+        setCallStatus('Failed');
+        alert(data.message);
+      } else if (data.type === 'end_call') {
+        handleEndCall(true);
       }
     };
 
-    return () => {
-      handleEndCall(true); // cleanup without sending signal
+    return () => signalingWs.current?.close();
+  }, [currentUser]);
+
+  const setupSpeechRecognition = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      
+      recognition.onresult = (event) => {
+        const transcript = event.results[event.results.length - 1][0].transcript;
+        if (grokWs.current?.readyState === WebSocket.OPEN) {
+          grokWs.current.send(JSON.stringify({ text: transcript, uid: currentUser.uid }));
+        }
+      };
+      
+      recognition.start();
+      speechReco.current = recognition;
+    }
+  };
+
+  const setupGrokWebSocket = () => {
+    grokWs.current = new WebSocket(`ws://${window.location.hostname}:8000/ws/grok`);
+    grokWs.current.onmessage = (e) => {
+       const data = JSON.parse(e.data);
+       if (data.alert) {
+         setGrokAlert(data.alert);
+       }
     };
-  }, [currentUser, navigate]);
+  };
 
   const setupMediaAndPC = async (targetUid) => {
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true }, video: true });
-    } catch (err) {
-      console.warn("Video failed, trying audio only...", err);
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
-      } catch (audioErr) {
-        console.error("Audio failed too", audioErr);
-        alert("Failed to access camera/mic. Please ensure a microphone is connected and allowed.");
-        return null;
-      }
-    }
+    peerConnection.current = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
 
-    localStreamRef.current = stream;
-    if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-    
-    startAnalyzingLocalStream(stream);
-
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-    peerConnection.current = pc;
-    
-    stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
-    pc.ontrack = (event) => {
-      if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== event.streams[0]) {
-        remoteVideoRef.current.srcObject = event.streams[0];
-        startAnalyzingRemoteStream(event.streams[0]);
-      }
-    };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && signalingWs.current?.readyState === WebSocket.OPEN) {
-        signalingWs.current.send(JSON.stringify({ 
-          type: 'candidate', 
+    peerConnection.current.onicecandidate = (event) => {
+      if (event.candidate && signalingWs.current.readyState === WebSocket.OPEN) {
+        signalingWs.current.send(JSON.stringify({
+          type: 'candidate',
           target_uid: targetUid,
-          candidate: event.candidate 
+          candidate: event.candidate
         }));
       }
     };
+
+    peerConnection.current.ontrack = (event) => {
+      remoteVideoRef.current.srcObject = event.streams[0];
+      startAnalyzingRemoteStream(event.streams[0]);
+    };
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch (e) {
+      console.warn("Video failed, trying audio only...", e);
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        console.error("Audio failed too", err);
+        return null;
+      }
+    }
     
-    return pc;
+    localVideoRef.current.srcObject = stream;
+    stream.getTracks().forEach(track => peerConnection.current.addTrack(track, stream));
+    
+    startAnalyzingLocalStream(stream);
+    setupGrokWebSocket();
+    setupSpeechRecognition();
+    
+    return peerConnection.current;
+  };
+
+  const resolveTargetUid = async () => {
+    if (!targetUser) return null;
+    try {
+      const q = query(collection(db, "users"), where("email", "==", targetUser));
+      const querySnapshot = await getDocs(q);
+      if (!querySnapshot.empty) {
+        return querySnapshot.docs[0].data().uid;
+      }
+      
+      const qPhone = query(collection(db, "users"), where("phone", "==", targetUser));
+      const phoneSnapshot = await getDocs(qPhone);
+      if (!phoneSnapshot.empty) {
+        return phoneSnapshot.docs[0].data().uid;
+      }
+    } catch (error) {
+      console.error("Error looking up user:", error);
+    }
+    return null;
   };
 
   const startCall = async () => {
-    if (!targetUser) return alert('Enter an email or phone number');
-    
     setCallStatus('Looking up user...');
-    try {
-      const usersRef = collection(db, "users");
-      let q = query(usersRef, where("email", "==", targetUser));
-      let querySnapshot = await getDocs(q);
-      
-      if (querySnapshot.empty) {
-        q = query(usersRef, where("phone", "==", targetUser));
-        querySnapshot = await getDocs(q);
-      }
-      
-      if (querySnapshot.empty) {
-        setCallStatus('User not found. Check the email or phone number.');
-        setTimeout(() => setCallStatus('Online - Ready to Call'), 3000);
-        return;
-      }
-      
-      const targetUid = querySnapshot.docs[0].data().uid;
-      
-      setActiveCallUid(targetUid);
-      setInCall(true);
-      setCallStatus('Ringing...');
-
-      const pc = await setupMediaAndPC(targetUid);
-      if (!pc) {
-        setInCall(false);
-        setCallStatus('Online - Ready to Call');
-        return;
-      }
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      
-      signalingWs.current.send(JSON.stringify({ 
-        type: 'offer', 
-        target_uid: targetUid,
-        offer 
-      }));
-      
-    } catch (err) {
-      console.error(err);
-      setCallStatus('Error connecting call.');
+    const resolvedUid = await resolveTargetUid();
+    
+    if (!resolvedUid) {
+      setCallStatus('Failed');
+      alert("User not found. Check the email or phone number.");
+      return;
     }
+
+    setCallStatus('Calling...');
+    const pc = await setupMediaAndPC(resolvedUid);
+    if (!pc) return;
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    signalingWs.current.send(JSON.stringify({ 
+      type: 'offer', 
+      target_uid: resolvedUid, 
+      offer 
+    }));
   };
 
   const acceptCall = async () => {
-    if (!incomingCall) return;
     const { offer, caller_uid } = incomingCall;
-    
-    setActiveCallUid(caller_uid);
     setIncomingCall(null);
-    setInCall(true);
     setCallStatus('Connecting...');
 
     const pc = await setupMediaAndPC(caller_uid);
-    if (!pc) {
-       setInCall(false);
-       setCallStatus('Online - Ready to Call');
-       return;
-    }
+    if (!pc) return;
 
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    
+
     signalingWs.current.send(JSON.stringify({ 
       type: 'answer', 
-      target_uid: caller_uid,
+      target_uid: caller_uid, 
       answer 
     }));
     
     setCallStatus('Connected');
+    setInCall(true);
   };
 
   const rejectCall = () => {
-    if (incomingCall && signalingWs.current?.readyState === WebSocket.OPEN) {
-      // Tell the caller we rejected it by ending the call
-      signalingWs.current.send(JSON.stringify({ 
-        type: 'end_call', 
-        target_uid: incomingCall.caller_uid 
-      }));
-    }
     setIncomingCall(null);
+    setCallStatus('Idle');
   };
 
-  // internal cleanup, triggered by remote or local
   const handleEndCall = (isRemote = false) => {
-    // If the local user pressed end call, we need to notify the remote user
-    if (!isRemote && activeCallUid && signalingWs.current?.readyState === WebSocket.OPEN) {
-       signalingWs.current.send(JSON.stringify({ 
-         type: 'end_call', 
-         target_uid: activeCallUid 
-       }));
-    }
-
     if (peerConnection.current) {
       peerConnection.current.close();
       peerConnection.current = null;
     }
-    if (localAnalyzeWs.current) localAnalyzeWs.current.close();
-    if (remoteAnalyzeWs.current) remoteAnalyzeWs.current.close();
-    if (localAudioContext.current) localAudioContext.current.close();
-    if (remoteAudioContext.current) remoteAudioContext.current.close();
-    if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop());
     
+    if (localVideoRef.current && localVideoRef.current.srcObject) {
+      localVideoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      localVideoRef.current.srcObject = null;
+    }
+    if (remoteVideoRef.current && remoteVideoRef.current.srcObject) {
+      remoteVideoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      remoteVideoRef.current.srcObject = null;
+    }
+    
+    if (speechReco.current) {
+      speechReco.current.stop();
+    }
+    
+    [localAudioContext, remoteAudioContext].forEach(ctx => {
+      if (ctx.current && ctx.current.state !== 'closed') {
+        ctx.current.close().catch(e => console.error(e));
+      }
+    });
+
+    if (!isRemote && signalingWs.current.readyState === WebSocket.OPEN && targetUser) {
+      resolveTargetUid().then(uid => {
+        if (uid) {
+           signalingWs.current.send(JSON.stringify({ type: 'end_call', target_uid: uid }));
+        }
+      });
+    }
+
     setInCall(false);
-    setActiveCallUid(null);
-    setCallStatus('Online - Ready to Call');
-    setRemoteResults(null);
-    setLocalResults(null);
-    setActiveChallenge(null);
+    setCallStatus('Idle');
+    setIncomingCall(null);
+    setGrokAlert(null);
   };
 
   const startAnalyzingLocalStream = (stream) => {
@@ -366,10 +379,21 @@ export default function ProtectedCall() {
             </div>
           </div>
 
-          <div className="bg-vox-navy-light rounded-2xl p-5 border border-vox-gray-dark/30 flex flex-col gap-4 shadow-lg">
+          <div className="bg-vox-navy-light rounded-2xl p-5 border border-vox-gray-dark/30 flex flex-col gap-4 shadow-lg overflow-y-auto max-h-[600px]">
              <div className="pb-4 border-b border-vox-gray-dark/30">
                <h3 className="text-lg font-bold text-white flex items-center gap-2"><Shield className="text-vox-orange" size={20} /> AI Analysis</h3>
              </div>
+             
+             {grokAlert && (
+               <div className="border border-red-500 bg-red-500/20 p-4 rounded-xl flex gap-3 animate-pulse">
+                 <AlertTriangle className="text-red-500 shrink-0" />
+                 <div>
+                   <h4 className="font-bold text-red-500 text-sm">Grok Scam Warning</h4>
+                   <p className="text-xs text-white mt-1">{grokAlert}</p>
+                 </div>
+               </div>
+             )}
+
              <div className="flex-1 flex flex-col gap-4">
                 <ResultCard title="Remote Speaker" results={remoteResults} />
                 <ResultCard title="Local Speaker" results={localResults} />

@@ -5,6 +5,13 @@ import json
 import os
 import torch
 import librosa
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+import asyncio
+
+load_dotenv()
+GROK_API_KEY = os.getenv("GROK_API_KEY")
+grok_client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1") if GROK_API_KEY else None
 
 # Try to import our new AI Model
 try:
@@ -24,6 +31,7 @@ app.add_middleware(
 )
 
 active_connections = {} # uid -> websocket
+transcript_buffers = {} # uid -> list of text
 
 class VoxDetector:
     def __init__(self):
@@ -31,7 +39,6 @@ class VoxDetector:
         self.model = None
         self.is_loaded = False
         
-        # Load the trained model if it exists
         weight_path = 'weights/voxguard_model.pth'
         if MODEL_AVAILABLE and os.path.exists(weight_path):
             try:
@@ -60,16 +67,10 @@ class VoxDetector:
                 "details": "Silence detected."
             }
 
-        # ---------------------------------------------------------
-        # AI ML INFERENCE
-        # ---------------------------------------------------------
         if self.is_loaded:
-            # 1. Convert raw PCM audio into a Mel Spectrogram
-            # (WebSocket sends float32 at 16000 Hz)
             mel_spec = librosa.feature.melspectrogram(y=audio_data, sr=16000, n_mels=128, fmax=8000)
             log_mel_spec = librosa.power_to_db(mel_spec, ref=np.max)
             
-            # Pad or truncate to 128 time-steps (matches our CNN input)
             max_len = 128
             if log_mel_spec.shape[1] < max_len:
                 pad_width = max_len - log_mel_spec.shape[1]
@@ -77,19 +78,14 @@ class VoxDetector:
             else:
                 log_mel_spec = log_mel_spec[:, :max_len]
                 
-            # 2. Convert to PyTorch Tensor: shape (Batch=1, Channels=1, Height=128, Width=128)
             tensor_input = torch.tensor(log_mel_spec, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(self.device)
             
-            # 3. Run Inference
             with torch.no_grad():
                 outputs = self.model(tensor_input)
-                # Apply softmax to get confidence percentages
                 probabilities = torch.nn.functional.softmax(outputs, dim=1)[0]
                 human_prob = probabilities[0].item()
                 ai_prob = probabilities[1].item()
             
-            # 4. Determine Classification
-            # Class 0: HUMAN, Class 1: AI
             is_ai = ai_prob > 0.5
             classification = "AI / SYNTHETIC" if is_ai else "AUTHENTIC HUMAN"
             
@@ -101,7 +97,6 @@ class VoxDetector:
                 "details": f"Confidence: AI={ai_prob*100:.1f}%, Human={human_prob*100:.1f}%"
             }
         else:
-            # Fallback if model isn't trained yet
             return {
                 "speech_detected": True,
                 "noise_level": noise_level,
@@ -126,6 +121,45 @@ async def websocket_analyze(websocket: WebSocket):
     except Exception as e:
         print(f"Analyze WS Error: {e}")
 
+@app.websocket("/ws/grok")
+async def websocket_grok(websocket: WebSocket):
+    await websocket.accept()
+    uid = None
+    try:
+        while True:
+            data = await websocket.receive_text()
+            msg = json.loads(data)
+            text = msg.get("text")
+            uid = msg.get("uid")
+            
+            if uid and text:
+                if uid not in transcript_buffers:
+                    transcript_buffers[uid] = []
+                transcript_buffers[uid].append(text)
+                
+                # If we have enough text (e.g. > 3 phrases), analyze with Grok
+                if len(transcript_buffers[uid]) >= 3 and grok_client:
+                    combined_text = " ".join(transcript_buffers[uid])
+                    transcript_buffers[uid] = [] # Reset buffer
+                    
+                    try:
+                        completion = await grok_client.chat.completions.create(
+                            model="grok-2-latest",
+                            messages=[
+                                {"role": "system", "content": "You are a cyber security AI monitoring a live phone call transcript. If the transcript sounds like a phishing attempt, social engineering, crypto scam, or tech support scam, immediately return a short, urgent 1-sentence warning starting with 'SCAM WARNING:'. If it is a normal conversation, return exactly 'SAFE'."},
+                                {"role": "user", "content": f"Live Transcript: {combined_text}"}
+                            ]
+                        )
+                        response_text = completion.choices[0].message.content
+                        if "SCAM WARNING" in response_text.upper():
+                            await websocket.send_text(json.dumps({"alert": response_text}))
+                    except Exception as e:
+                        print(f"Grok API Error: {e}")
+                        
+    except WebSocketDisconnect:
+        if uid in transcript_buffers:
+            del transcript_buffers[uid]
+
 @app.websocket("/ws/call/{uid}")
 async def websocket_call(websocket: WebSocket, uid: str):
     await websocket.accept()
@@ -147,9 +181,5 @@ async def websocket_call(websocket: WebSocket, uid: str):
                     await websocket.send_text(json.dumps({"type": "error", "message": "User is not online."}))
                     
     except WebSocketDisconnect:
-        if uid in active_connections:
-            del active_connections[uid]
-    except Exception as e:
-        print(f"Call WS Error: {e}")
         if uid in active_connections:
             del active_connections[uid]
