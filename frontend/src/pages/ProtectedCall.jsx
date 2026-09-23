@@ -1,5 +1,5 @@
-﻿import React, { useState, useEffect, useRef } from 'react';
-import { Shield, Phone, PhoneOff, ShieldAlert, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Shield, Phone, PhoneOff, ShieldAlert, AlertTriangle, PhoneIncoming, Mic, MicOff, Camera, CameraOff } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../firebase';
 import { collection, query, where, getDocs } from 'firebase/firestore';
@@ -16,6 +16,9 @@ export default function ProtectedCall() {
   const [remoteResults, setRemoteResults] = useState(null);
   const [localResults, setLocalResults] = useState(null);
   const [grokAlert, setGrokAlert] = useState(null);
+  
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
   
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
@@ -65,6 +68,14 @@ export default function ProtectedCall() {
     return () => signalingWs.current?.close();
   }, [currentUser]);
 
+  const [localStream, setLocalStream] = useState(null);
+
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localVideoRef.current, localStream, inCall]);
+
   const setupSpeechRecognition = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
@@ -110,7 +121,14 @@ export default function ProtectedCall() {
     };
 
     peerConnection.current.ontrack = (event) => {
-      remoteVideoRef.current.srcObject = event.streams[0];
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+      } else {
+        // Fallback if not rendered yet, though it should be if ontrack fires
+        setTimeout(() => {
+           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = event.streams[0];
+        }, 500);
+      }
       startAnalyzingRemoteStream(event.streams[0]);
     };
 
@@ -127,7 +145,11 @@ export default function ProtectedCall() {
       }
     }
     
-    localVideoRef.current.srcObject = stream;
+    setLocalStream(stream);
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = stream;
+    }
+    
     stream.getTracks().forEach(track => peerConnection.current.addTrack(track, stream));
     
     startAnalyzingLocalStream(stream);
@@ -288,6 +310,20 @@ export default function ProtectedCall() {
     setActiveChallenge("Dynamic Liveness UI Test Triggered");
   };
 
+  const toggleMute = () => {
+    if (localStream) {
+      localStream.getAudioTracks().forEach(t => t.enabled = !t.enabled);
+      setIsMuted(!localStream.getAudioTracks()[0]?.enabled);
+    }
+  };
+
+  const toggleVideo = () => {
+    if (localStream) {
+      localStream.getVideoTracks().forEach(t => t.enabled = !t.enabled);
+      setIsVideoOff(!localStream.getVideoTracks()[0]?.enabled);
+    }
+  };
+
   const ResultCard = ({ title, results }) => {
     if (!results) return <div className="flex-1 border border-vox-gray-dark/30 rounded-xl p-4 flex items-center justify-center text-sm opacity-50 bg-black/20">Waiting...</div>;
     const isThreat = results.final_classification === 'AI / SYNTHETIC';
@@ -367,12 +403,20 @@ export default function ProtectedCall() {
 
               <div className="absolute bottom-4 right-4 w-48 aspect-video bg-vox-navy border-2 border-vox-gray-dark/50 rounded-xl overflow-hidden shadow-2xl flex items-center justify-center text-vox-gray text-xs text-center p-2">
                  <video ref={localVideoRef} autoPlay muted playsInline className="absolute inset-0 w-full h-full object-cover transform scale-x-[-1]"></video>
-                 <span>(Audio Only Mode)</span>
+                 {isVideoOff && <div className="absolute inset-0 bg-black/80 flex items-center justify-center"><CameraOff className="opacity-50"/></div>}
+                 {!localStream?.getVideoTracks()[0] && !isVideoOff && <span>(Audio Only Mode)</span>}
+                 {isMuted && <div className="absolute top-1 right-1 bg-red-500/80 p-1 rounded-full"><MicOff size={14} className="text-white"/></div>}
                  <div className="absolute bottom-1 left-1 bg-black/60 px-2 py-0.5 rounded text-xs text-white z-10">You</div>
               </div>
             </div>
             
             <div className="flex items-center justify-center gap-6 bg-vox-navy-light rounded-2xl border border-vox-gray-dark/30 p-4">
+               <button onClick={toggleMute} className={`px-4 py-3 rounded-full font-bold transition-colors ${isMuted ? 'bg-red-600/20 text-red-500' : 'bg-vox-navy hover:bg-vox-gray-dark text-white'}`}>
+                 {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+               </button>
+               <button onClick={toggleVideo} className={`px-4 py-3 rounded-full font-bold transition-colors ${isVideoOff ? 'bg-red-600/20 text-red-500' : 'bg-vox-navy hover:bg-vox-gray-dark text-white'}`}>
+                 {isVideoOff ? <CameraOff size={20} /> : <Camera size={20} />}
+               </button>
                <button onClick={() => handleEndCall(false)} className="bg-red-600 px-8 py-3 rounded-full hover:bg-red-700 text-white font-bold flex items-center gap-2"><PhoneOff size={20} /> End Call</button>
                <div className="h-8 w-px bg-vox-gray-dark/30"></div>
                <button onClick={sendChallenge} className="bg-vox-navy border border-vox-orange text-vox-orange px-6 py-3 rounded-full font-bold"><ShieldAlert size={20} className="inline mr-2"/> Issue Challenge</button>
